@@ -1,0 +1,6 @@
+id=untrust-emudhra
+name=Untrust eMudhra Compromised CAs
+version=v1.0.0
+versionCode=100
+author=untrust-emudhra
+description=Removes trust in compromised eMudhra intermediate CA chains (Oct 2026). Distrusts emSign ECC Root CA - G3, AAA Certificate Services cross-sign root, and related eMudhra G3 roots from the system / Conscrypt CA store. Works with Magisk and KernelSU. Ref: https://emudhra.we-have-a-problem.com/

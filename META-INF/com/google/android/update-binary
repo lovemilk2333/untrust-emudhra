@@ -1,0 +1,66 @@
+#!/sbin/sh
+# Magisk module installer bootstrap (also works when flashed via KernelSU / APatch)
+
+umask 022
+
+ui_print() { echo "$1"; }
+
+require_new_magisk() {
+  ui_print "*******************************"
+  ui_print " Please install Magisk v20.4+  "
+  ui_print " or KernelSU / APatch          "
+  ui_print "*******************************"
+  exit 1
+}
+
+OUTFD=$2
+ZIPFILE=$3
+
+mount /data 2>/dev/null
+
+# Magisk path
+if [ -f /data/adb/magisk/util_functions.sh ]; then
+  . /data/adb/magisk/util_functions.sh
+  [ "$MAGISK_VER_CODE" -lt 20400 ] && require_new_magisk
+  install_module
+  exit 0
+fi
+
+# KernelSU ships Magisk-compatible util_functions in some builds
+if [ -f /data/adb/ksu/bin/busybox ] || [ -d /data/adb/ksu ]; then
+  if [ -f /data/adb/ksu/util_functions.sh ]; then
+    . /data/adb/ksu/util_functions.sh
+    install_module
+    exit 0
+  fi
+fi
+
+# Generic fallback installer for Magisk-module layout
+ui_print "- Installing Untrust eMudhra Compromised CAs (fallback)"
+
+MODPATH=/data/adb/modules/untrust-emudhra
+mkdir -p /data/adb/modules
+rm -rf "$MODPATH"
+mkdir -p "$MODPATH"
+
+if command -v unzip >/dev/null 2>&1; then
+  unzip -o "$ZIPFILE" -x 'META-INF/*' -d "$MODPATH"
+else
+  /data/adb/magisk/busybox unzip -o "$ZIPFILE" -x 'META-INF/*' -d "$MODPATH" 2>/dev/null \
+    || /data/adb/ksu/bin/busybox unzip -o "$ZIPFILE" -x 'META-INF/*' -d "$MODPATH" 2>/dev/null \
+    || busybox unzip -o "$ZIPFILE" -x 'META-INF/*' -d "$MODPATH"
+fi
+
+for s in post-fs-data.sh service.sh uninstall.sh customize.sh common.sh; do
+  [ -f "$MODPATH/$s" ] && chmod 755 "$MODPATH/$s"
+done
+# common.sh is sourced, not executed — still readable
+[ -f "$MODPATH/common.sh" ] && chmod 644 "$MODPATH/common.sh"
+[ -f "$MODPATH/post-fs-data.sh" ] && chmod 755 "$MODPATH/post-fs-data.sh"
+[ -f "$MODPATH/service.sh" ] && chmod 755 "$MODPATH/service.sh"
+[ -f "$MODPATH/uninstall.sh" ] && chmod 755 "$MODPATH/uninstall.sh"
+
+rm -f "$MODPATH/disable" "$MODPATH/remove" "$MODPATH/update"
+
+ui_print "- Done. Reboot to apply CA distrust."
+exit 0
