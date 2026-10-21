@@ -1,119 +1,211 @@
 #!/system/bin/sh
-# Shared helpers for Untrust eMudhra Compromised CAs
-# POSIX sh (Magisk / KernelSU service scripts run under toybox/mksh)
+# Block compromised eMudhra CAs without wiping the real system partition.
+#
+# Android has TWO disable paths:
+# 1) TrustedCertificateStore  -> /data/misc/keychain/cacerts-removed
+#    Matches by exact X509Certificate.equals() (KeyChain writes DER).
+# 2) SystemCertificateSource  -> /data/misc/user/<id>/cacerts-removed
+#    Matches by FILENAME only (used by NetworkSecurityConfig / most apps).
+#
+# Intermediates are usually NOT in the system CA dir, so disabling them via
+# cacerts-removed alone does nothing for TLS. Blocking the issuing / cross-
+# signing ROOTS is what breaks the compromised chains.
+#
+# Overlay: Magisk/KSU also hides those root files from the runtime CA dir
+# (system + Conscrypt APEX) so TLS fails even if cacerts-removed is ignored.
 
 MODDIR="${MODDIR:-${0%/*}}"
-SYS_CERT_DIR=/system/etc/security/cacerts
-APEX_CERT_DIR=/apex/com.android.conscrypt/cacerts
+BLOCKLIST_DIR="$MODDIR/blocklist"
+BLOCKLIST_DER_DIR="$MODDIR/blocklist-der"
+MARKER_DIR="$MODDIR/installed-removed"
 WORK_DIR="$MODDIR/cacerts-work"
 LOG_FILE="$MODDIR/log.txt"
 
-# Android OpenSSL subject_hash_old of roots that should no longer be trusted.
-# b74d2bd5 = emSign ECC Root CA - G3 (cross-signer of compromised intermediates)
-# 75680d2e = AAA Certificate Services / Comodo (Sectigo cross-sign root)
-# 60a9fcc6 = emSign Root TLS CA - G3 (direct issuer; Microsoft root store)
-# f468719d = emSign Root CS CA - G3 (code-signing root; Microsoft root store)
-#
-# SHA-256 fingerprints below are from:
-#   https://emudhra.we-have-a-problem.com/impacted-intermediates.json
-#   https://emudhra.we-have-a-problem.com/roots.json
+SYS_CERT_DIR=/system/etc/security/cacerts
+APEX_CERT_DIR=/apex/com.android.conscrypt/cacerts
+KEYCHAIN_REMOVED=/data/misc/keychain/cacerts-removed
+
+# Roots we disable (Android subject_hash_old). Intermediates are shipped in
+# blocklist for completeness but only roots present on-device matter for TLS.
+ROOT_HASHES="b74d2bd5 75680d2e 60a9fcc6 f468719d"
 
 log() {
   echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >>"$LOG_FILE"
 }
 
-# Compute cert SHA-256 fingerprint (uppercase hex, no colons). Empty on failure.
-cert_sha256() {
-  _f="$1"
-  _out=""
-  if command -v openssl >/dev/null 2>&1; then
-    _out=$(openssl x509 -in "$_f" -noout -fingerprint -sha256 2>/dev/null)
-    _out=$(echo "$_out" | sed 's/^.*=//' | tr -d ':' | tr 'a-f' 'A-F')
-  fi
-  echo "$_out"
-}
-
-# Match Android CA filename like b74d2bd5.0 / b74d2bd5.1
-is_blocked_hash_name() {
+is_root_hash_name() {
   case "$1" in
     b74d2bd5.*|75680d2e.*|60a9fcc6.*|f468719d.*) return 0 ;;
   esac
   return 1
 }
 
-# Match known bad SHA-256 fingerprints (roots + compromised intermediates)
-is_blocked_sha256() {
-  case "$1" in
-    # roots
-    86A1ECBA089C4A8D3BBE2734C612BA341D813E043CF9E8A862CD5C57A36BBE6B) return 0 ;;
-    D7A7A0FB5D7E2731D771E9484EBCDEF71D5F0C3E0A2948782BC83EE0EA699EF4) return 0 ;;
-    7DD78D5F4F13459A83DFF9ABBBA62EDBAF6F2D102BF257FD712F4D9F2746ED8D) return 0 ;;
-    F2EDAAFF3D9B701FB4D14C9F285F8C0BAD90FC3BCC1FA07D47F4718EDABA34A5) return 0 ;;
-    # intermediates + cross-signs
-    42C4ACCD12C4F59597925E1A08A7A90102608543809308D50EC427E118BA1493) return 0 ;;
-    45A883F349AEDFD5F3A649B5498FFB121712BA8B448F3F2A91DBC5A766FCDDBE) return 0 ;;
-    98B896625C0C230ADEEC3EB2CF6AAD5001ECF9156A68644E82374CE5833BC25B) return 0 ;;
-    5F1DED4DD590AF74631290CF073B122A2AAC6A1FA479778A0BD43579BD832699) return 0 ;;
-    E7568FE6E12331F4FD7DE61DA4C7559D0F8EB192A218D4741A3BA75184333838) return 0 ;;
-    579480AEA166290BD3C643589E795FC0D0E54E86505D180F1DFF99EFD3199512) return 0 ;;
-    0164D7CEAE5BB909C272AF151FF44B1177AE9B47D9424B94F1D9558C30934D19) return 0 ;;
-    62B7F9868263F72F6911FC78CEAF72C1979158B7368BF648683BB2AA39B02E72) return 0 ;;
-    CB6E15165AC802E9B3F993F16C25D41F4E81C21EBDE71AE1B012AC00BF9C7C3F) return 0 ;;
-    7485B51C0ED192878FA1D2F948FB529AE1842CC5086C4B67F7BE5B2039DE9489) return 0 ;;
-    432EC25F0D28DE9006D97BF752F17BBB2CD41F669933FCB072D9A1148D0261F3) return 0 ;;
-    FD9D5C2DBBD4995AB69B8D50C439D9527B00529199C2FD01B2174EB58F07021F) return 0 ;;
-    9E39DE2881273ACC225A149C72BA3E0F51424963669AB633EE1DC7DF5DB067B4) return 0 ;;
-    A496E23AC0CAB8155FC9B117B97EAE368EFCBB9041AEC8804D5A308D2D01C2D8) return 0 ;;
-    4B2460A466F95FD40113BCDCCA2CEB29B3B093921DE45474DA7DF48874C630B1) return 0 ;;
-    84112972B8E59D14560AE7E7119654474AAD119990CF3722BFC1E3B91615E1FD) return 0 ;;
-  esac
-  return 1
+list_user_removed_dirs() {
+  if [ -d /data/misc/user ]; then
+    for d in /data/misc/user/*; do
+      [ -d "$d" ] || continue
+      echo "$d/cacerts-removed"
+    done
+  fi
+  # Always include user 0 even if misc/user layout is odd
+  echo "/data/misc/user/0/cacerts-removed"
 }
 
-# Remove blocked certs from a directory of Android CA files (*.0, *.1, ...)
-remove_blocked_from_dir() {
-  _dir="$1"
-  _removed=0
+list_removed_dirs() {
+  echo "$KEYCHAIN_REMOVED"
+  # Deduplicate without requiring awk
+  _seen_keychain=1
+  for _ud in $(list_user_removed_dirs); do
+    [ "$_ud" = "$KEYCHAIN_REMOVED" ] && continue
+    echo "$_ud"
+  done
+}
 
-  [ -d "$_dir" ] || return 0
+ensure_dir() {
+  _d="$1"
+  mkdir -p "$_d" 2>/dev/null
+  chown system:system "$_d" 2>/dev/null || true
+  chmod 775 "$_d" 2>/dev/null || chmod 771 "$_d" 2>/dev/null || true
+  # Match typical keychain / user config labels
+  restorecon -RF "$_d" 2>/dev/null \
+    || chcon u:object_r:system_data_file:s0 "$_d" 2>/dev/null \
+    || true
+}
 
-  # Use find if available; else glob
-  _list=""
-  if command -v find >/dev/null 2>&1; then
-    _list=$(find "$_dir" -maxdepth 1 -type f 2>/dev/null)
-  else
-    _list=$(ls "$_dir" 2>/dev/null)
+# Prefer the on-device system/APEX file (exact bytes + name). Else use bundled DER.
+resolve_block_source() {
+  _name="$1"
+  _outvar="$2"
+  _src=""
+
+  if [ -f "$APEX_CERT_DIR/$_name" ]; then
+    _src="$APEX_CERT_DIR/$_name"
+  elif [ -f "$SYS_CERT_DIR/$_name" ]; then
+    _src="$SYS_CERT_DIR/$_name"
+  elif [ -f "$BLOCKLIST_DER_DIR/$_name" ]; then
+    _src="$BLOCKLIST_DER_DIR/$_name"
+  elif [ -f "$BLOCKLIST_DIR/$_name" ]; then
+    _src="$BLOCKLIST_DIR/$_name"
   fi
 
-  # shellcheck disable=SC2086
-  for _entry in $_list; do
-    # ls path may be basename only
-    case "$_entry" in
-      /*) _f="$_entry" ;;
-      *)  _f="$_dir/$_entry" ;;
-    esac
-    [ -f "$_f" ] || continue
-    _base=${_f##*/}
-
-    if is_blocked_hash_name "$_base"; then
-      log "REMOVE by hash-name: $_f"
-      rm -f "$_f"
-      _removed=$((_removed + 1))
-      continue
-    fi
-
-    _fp=$(cert_sha256 "$_f")
-    if is_blocked_sha256 "$_fp"; then
-      log "REMOVE by sha256=$_fp: $_f"
-      rm -f "$_f"
-      _removed=$((_removed + 1))
-    fi
-  done
-
-  log "Removed $_removed cert(s) from $_dir"
+  eval "$_outvar=\"\$_src\""
 }
 
-fix_perms() {
+install_one_removed() {
+  _src="$1"
+  _dst_dir="$2"
+  _name=${_src##*/}
+  _dst="$_dst_dir/$_name"
+
+  ensure_dir "$_dst_dir"
+
+  # If source is PEM, convert to DER when openssl is available (KeyChain format).
+  # CertificateFactory accepts PEM too, but DER matches Settings/KeyChain.
+  if command -v openssl >/dev/null 2>&1; then
+    if grep -q "BEGIN CERTIFICATE" "$_src" 2>/dev/null; then
+      openssl x509 -in "$_src" -outform DER -out "$_dst" 2>/dev/null \
+        || cp -f "$_src" "$_dst"
+    else
+      cp -f "$_src" "$_dst"
+    fi
+  else
+    cp -f "$_src" "$_dst" 2>/dev/null || cat "$_src" >"$_dst"
+  fi
+
+  chown system:system "$_dst" 2>/dev/null || true
+  chmod 644 "$_dst" 2>/dev/null
+  restorecon "$_dst" 2>/dev/null \
+    || chcon u:object_r:system_data_file:s0 "$_dst" 2>/dev/null \
+    || true
+}
+
+install_blocklist() {
+  _count=0
+  _roots=0
+
+  mkdir -p "$MARKER_DIR"
+  rm -f "$MARKER_DIR"/*
+
+  # 1) Disable every root hash that exists on the device (exact device file).
+  for _hash in $ROOT_HASHES; do
+    _idx=0
+    while true; do
+      _name="${_hash}.${_idx}"
+      _src=""
+      if [ -f "$APEX_CERT_DIR/$_name" ]; then
+        _src="$APEX_CERT_DIR/$_name"
+      elif [ -f "$SYS_CERT_DIR/$_name" ]; then
+        _src="$SYS_CERT_DIR/$_name"
+      else
+        break
+      fi
+      echo "$_name" >"$MARKER_DIR/$_name"
+      for _dir in $(list_removed_dirs); do
+        install_one_removed "$_src" "$_dir"
+        log "BLOCK root $_name (from device) -> $_dir/"
+      done
+      _count=$((_count + 1))
+      _roots=$((_roots + 1))
+      _idx=$((_idx + 1))
+    done
+  done
+
+  # 2) Also install bundled blocklist (roots not on device + intermediates).
+  #    Filename match helps SystemCertificateSource; content match helps TCS.
+  if [ -d "$BLOCKLIST_DER_DIR" ] || [ -d "$BLOCKLIST_DIR" ]; then
+    _bundled="$BLOCKLIST_DER_DIR"
+    [ -d "$_bundled" ] && [ -n "$(ls -A "$_bundled" 2>/dev/null)" ] \
+      || _bundled="$BLOCKLIST_DIR"
+    for _src in "$_bundled"/*; do
+      [ -f "$_src" ] || continue
+      _name=${_src##*/}
+      [ -f "$MARKER_DIR/$_name" ] && continue
+      echo "$_name" >"$MARKER_DIR/$_name"
+      for _dir in $(list_removed_dirs); do
+        install_one_removed "$_src" "$_dir"
+        log "BLOCK bundled $_name -> $_dir/"
+      done
+      _count=$((_count + 1))
+    done
+  fi
+
+  log "cacerts-removed: $_count file(s), of which $_roots from on-device roots"
+  return 0
+}
+
+uninstall_blocklist() {
+  if [ -d "$MARKER_DIR" ]; then
+    for _m in "$MARKER_DIR"/*; do
+      [ -f "$_m" ] || continue
+      _name=${_m##*/}
+      for _dir in $(list_removed_dirs); do
+        rm -f "$_dir/$_name"
+        log "UNBLOCK $_name from $_dir/"
+      done
+      rm -f "$_m"
+    done
+  fi
+  # Also wipe known bundled names
+  for _dir in "$BLOCKLIST_DER_DIR" "$BLOCKLIST_DIR"; do
+    [ -d "$_dir" ] || continue
+    for _src in "$_dir"/*; do
+      [ -f "$_src" ] || continue
+      _name=${_src##*/}
+      for _rd in $(list_removed_dirs); do
+        rm -f "$_rd/$_name"
+      done
+    done
+  done
+}
+
+notify_keychain() {
+  am broadcast -a android.security.action.TRUST_STORE_CHANGED --receiver-include-background 2>/dev/null || true
+  am broadcast -a android.security.STORAGE_CHANGED 2>/dev/null || true
+  # Clear NetworkSecurityConfig cert cache in running apps is not possible;
+  # zygote overlay below covers new processes.
+}
+
+fix_perms_dir() {
   _dir="$1"
   [ -d "$_dir" ] || return 0
   chown -R root:root "$_dir" 2>/dev/null
@@ -127,46 +219,100 @@ fix_perms() {
     || true
 }
 
-# Build a filtered CA directory in WORK_DIR from a source CA directory.
+# Build filtered CA dir: copy system/APEX certs, omit blocked root filenames.
 build_filtered_store() {
   _src="$1"
-
   rm -rf "$WORK_DIR"
   mkdir -p "$WORK_DIR"
-
   if [ ! -d "$_src" ] || [ -z "$(ls -A "$_src" 2>/dev/null)" ]; then
-    log "Source CA dir empty or missing: $_src"
+    log "overlay: source empty $_src"
     return 1
   fi
-
-  cp -p "$_src"/* "$WORK_DIR"/ 2>/dev/null || cp "$_src"/* "$WORK_DIR"/
-  remove_blocked_from_dir "$WORK_DIR"
-  fix_perms "$WORK_DIR"
-  log "Built filtered store at $WORK_DIR ($(ls "$WORK_DIR" 2>/dev/null | wc -l) certs)"
+  for _f in "$_src"/*; do
+    [ -f "$_f" ] || continue
+    _name=${_f##*/}
+    if is_root_hash_name "$_name"; then
+      log "overlay: omit $_name"
+      continue
+    fi
+    cp -p "$_f" "$WORK_DIR/$_name" 2>/dev/null || cp "$_f" "$WORK_DIR/$_name"
+  done
+  fix_perms_dir "$WORK_DIR"
+  log "overlay: built $WORK_DIR ($(ls "$WORK_DIR" 2>/dev/null | wc -l) certs)"
   return 0
 }
 
-has_bind_mount() {
-  _pid="$1"
-  _target="$2"
-  grep -q " ${_target} " "/proc/$_pid/mountinfo" 2>/dev/null
+# Magisk systemless: populate $MODDIR/system/etc/security/cacerts without roots
+prepare_magisk_overlay() {
+  _src=""
+  if [ -d "$APEX_CERT_DIR" ] && [ -n "$(ls -A "$APEX_CERT_DIR" 2>/dev/null)" ]; then
+    _src="$APEX_CERT_DIR"
+  elif [ -d "$SYS_CERT_DIR" ] && [ -n "$(ls -A "$SYS_CERT_DIR" 2>/dev/null)" ]; then
+    _src="$SYS_CERT_DIR"
+  else
+    return 1
+  fi
+  mkdir -p "$MODDIR$SYS_CERT_DIR"
+  rm -rf "$MODDIR$SYS_CERT_DIR"
+  mkdir -p "$MODDIR$SYS_CERT_DIR"
+  for _f in "$_src"/*; do
+    [ -f "$_f" ] || continue
+    _name=${_f##*/}
+    is_root_hash_name "$_name" && continue
+    cp -p "$_f" "$MODDIR$SYS_CERT_DIR/$_name" 2>/dev/null || cp "$_f" "$MODDIR$SYS_CERT_DIR/$_name"
+  done
+  fix_perms_dir "$MODDIR$SYS_CERT_DIR"
+  build_filtered_store "$_src"
+  log "magisk overlay prepared from $_src"
 }
 
 bind_into_pid() {
   _pid="$1"
   _src="$2"
   _dst="$3"
-  [ -n "$_pid" ] || return 1
-  [ -d "/proc/$_pid" ] || return 1
+  [ -n "$_pid" ] && [ -d "/proc/$_pid" ] || return 1
   if [ -x /system/bin/nsenter ]; then
     /system/bin/nsenter --mount=/proc/$_pid/ns/mnt -- \
       /bin/mount --bind "$_src" "$_dst" 2>/dev/null && return 0
     /system/bin/nsenter --mount=/proc/$_pid/ns/mnt -- \
       mount --bind "$_src" "$_dst" 2>/dev/null && return 0
   fi
-  if command -v nsenter >/dev/null 2>&1; then
-    nsenter --mount=/proc/$_pid/ns/mnt -- \
-      mount --bind "$_src" "$_dst" 2>/dev/null && return 0
+  command -v nsenter >/dev/null 2>&1 || return 1
+  nsenter --mount=/proc/$_pid/ns/mnt -- mount --bind "$_src" "$_dst" 2>/dev/null
+}
+
+inject_conscrypt_overlay() {
+  [ -d "$APEX_CERT_DIR" ] || {
+    log "no APEX cacerts; skip conscrypt inject"
+    return 0
+  }
+  _bind="$WORK_DIR"
+  if [ ! -d "$_bind" ] || [ -z "$(ls -A "$_bind" 2>/dev/null)" ]; then
+    build_filtered_store "$APEX_CERT_DIR" || build_filtered_store "$SYS_CERT_DIR" || return 1
   fi
-  return 1
+
+  # Also tmpfs-replace system path for non-APEX consumers
+  if mount -t tmpfs -o mode=755 tmpfs "$SYS_CERT_DIR" 2>/dev/null \
+    || mount -t tmpfs tmpfs "$SYS_CERT_DIR" 2>/dev/null; then
+    cp -p "$_bind"/* "$SYS_CERT_DIR"/ 2>/dev/null || cp "$_bind"/* "$SYS_CERT_DIR"/
+    fix_perms_dir "$SYS_CERT_DIR"
+    log "tmpfs on $SYS_CERT_DIR"
+    _bind="$SYS_CERT_DIR"
+  fi
+
+  for name in zygote zygote64; do
+    for zp in $(pidof "$name" 2>/dev/null); do
+      if bind_into_pid "$zp" "$_bind" "$APEX_CERT_DIR"; then
+        log "bound APEX into $name $zp"
+      else
+        log "WARN: bind failed $name $zp"
+      fi
+      children=$(ps -o PID= -P "$zp" 2>/dev/null)
+      [ -z "$children" ] && children=$(ps 2>/dev/null | awk -v P="$zp" '$3==P{print $2}')
+      for pid in $children; do
+        bind_into_pid "$pid" "$_bind" "$APEX_CERT_DIR" &
+      done
+      wait
+    done
+  done
 }

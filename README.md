@@ -1,68 +1,72 @@
 # Untrust eMudhra Compromised CAs
 
-Magisk / KernelSU / APatch module that **distrusts** the certificate authorities involved in the **October 2026 eMudhra intermediate CA private-key compromise**.
+Magisk / KernelSU / APatch module that **blocks** the CAs from the [October 2026 eMudhra intermediate CA compromise](https://emudhra.we-have-a-problem.com/).
 
-Reference: [https://emudhra.we-have-a-problem.com/](https://emudhra.we-have-a-problem.com/)
+## Why v1.1 “blocked nothing”
 
-Google / Android may already block the compromised intermediates via Play Services CRLSet-style updates. This module is a **local, system-wide workaround** for devices that still trust the affected roots (custom ROMs, delayed Mainline updates, non-Google builds, offline devices, apps using the system CA store without CT).
+Android does **not** treat files in `cacerts-removed` as a general SPKI blocklist.
 
-## What is removed from the trust store
+| Mechanism | Path | How match works |
+|---|---|---|
+| KeyChain / TrustedCertificateStore | `/data/misc/keychain/cacerts-removed` | Exact certificate equality (KeyChain writes **DER**) |
+| NetworkSecurityConfig / apps | `/data/misc/user/<id>/cacerts-removed` | **Filename** must equal the system CA file (`b74d2bd5.0`) |
 
-| Android hash | Certificate |
+Also: **compromised intermediates are not system trust anchors**. Putting them in `cacerts-removed` alone never breaks TLS. You must disable the **roots** that still sit in the system / Conscrypt store (`emSign ECC Root CA - G3`, `AAA Certificate Services`, …).
+
+## What v1.2 does
+
+1. **Disable (block)**  
+   Copies the **on-device** root CA file (when present) into:
+   - `/data/misc/keychain/cacerts-removed/`
+   - `/data/misc/user/*/cacerts-removed/`  
+   Prefers DER (KeyChain format). Bundled PEMs/DERs are fallbacks.
+
+2. **Systemless overlay (effective TLS block)**  
+   Builds a CA directory **without** the blocked root hashes and:
+   - Magisk-mounts it over `/system/etc/security/cacerts`
+   - Bind-mounts it into zygote/apps over `/apex/com.android.conscrypt/cacerts` (Android 14+)
+
+The real system / APEX partition files are **not** deleted; they are hidden at runtime and marked disabled in Settings.
+
+## Roots targeted
+
+| Hash | Certificate |
 |---|---|
-| `b74d2bd5` | **emSign ECC Root CA - G3** (public root that signed the broken intermediates) |
-| `75680d2e` | **AAA Certificate Services** (Comodo/Sectigo root used for cross-signs) |
-| `60a9fcc6` | **emSign Root TLS CA - G3** (direct issuer root) |
-| `f468719d` | **emSign Root CS CA - G3** (code-signing root) |
+| `b74d2bd5` | emSign ECC Root CA - G3 |
+| `75680d2e` | AAA Certificate Services |
+| `60a9fcc6` | emSign Root TLS CA - G3 |
+| `f468719d` | emSign Root CS CA - G3 |
 
-The module also drops any CA file whose SHA-256 fingerprint matches the eight compromised intermediates and their Sectigo cross-signs (from `impacted-intermediates.json`).
-
-> **Side effect:** Legitimate certificates that still chain only through these roots will fail TLS. Chrome is removing `emSign ECC Root CA - G3` for the same reason. Prefer updated OS/browser trust stores when available.
-
-## Compatibility
-
-| Component | Support |
-|---|---|
-| Magisk | Yes (systemless mount + scripts) |
-| KernelSU / APatch | Yes (`/data/adb/modules`) |
-| Android ≤ 13 | `/system/etc/security/cacerts` overlay |
-| Android 14+ | Conscrypt APEX bind-mount into zygote / apps (`service.sh`) |
+Bundled intermediate PEMs remain for completeness; TLS impact comes from the roots.
 
 ## Install
 
-1. Build the zip (see below) or use a release zip.
-2. Flash in **Magisk / KernelSU / APatch** → Modules → Install from storage.
-3. **Reboot**.
-4. Optional check (certificate error means distrust worked):
+```bash
+./build.sh
+# flash dist/untrust-emudhra-v1.2.0.zip → reboot
+```
+
+Check:
+
+```text
+/data/adb/modules/untrust-emudhra/log.txt
+```
+
+You should see lines like `BLOCK root b74d2bd5.0 (from device)` and `bound APEX into zygote`.
+
+Verify (expect certificate error):
 
 ```bash
-# on device / via adb shell (if curl exists)
 curl -v https://dv-g3b-emudhra.we-have-a-problem.com/
 curl -v https://dv-g3b-aaa-emudhra.we-have-a-problem.com/
 ```
 
-Or open those URLs in a browser that uses the **system** CA store (not a browser that already shipped its own blocklist).
-
-Logs: `/data/adb/modules/untrust-emudhra/log.txt`
-
-## Build zip
-
-```bash
-./build.sh
-# → dist/untrust-emudhra-v1.0.0.zip
-```
+Chrome may already block via CRLSet; use a client that uses the **system** CA store.
 
 ## Uninstall
 
-Disable or remove the module in Magisk/KSU and reboot. Trust store returns to stock.
-
-## Limitations
-
-- Does **not** patch app-private CA bundles (e.g. some WebViews, custom OkHttp trust managers, bundled `cacert.pem`).
-- Does **not** replace Google Play system updates; keep the device updated.
-- Zygote bind-mount needs `nsenter` (present on modern Magisk/KSU environments). If inject fails, check `log.txt`.
-- Removing **AAA Certificate Services** can break rare legacy chains that still use that root for non-eMudhra sites.
+Remove the module and reboot. `uninstall.sh` removes only this module’s `cacerts-removed` entries.
 
 ## License
 
-[Unlicense](https://unlicense.org) (public domain) — see [LICENSE](LICENSE).
+[Unlicense](https://unlicense.org) — see [LICENSE](LICENSE).

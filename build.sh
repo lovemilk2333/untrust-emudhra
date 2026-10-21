@@ -19,6 +19,18 @@ chmod 644 module.prop common.sh README.md 2>/dev/null || true
 chmod 755 META-INF/com/google/android/update-binary 2>/dev/null || true
 
 # Zip contents (no parent folder)
+# Refresh DER copies from PEM blocklist when openssl is available
+if command -v openssl >/dev/null 2>&1 && [ -d blocklist ]; then
+  mkdir -p blocklist-der
+  for f in blocklist/*; do
+    [ -f "$f" ] || continue
+    base=$(basename "$f")
+    openssl x509 -in "$f" -outform DER -out "blocklist-der/$base" 2>/dev/null || true
+  done
+fi
+
+chmod 644 blocklist/* blocklist-der/* 2>/dev/null || true
+
 zip -r9 "$OUT" \
   META-INF \
   module.prop \
@@ -29,6 +41,8 @@ zip -r9 "$OUT" \
   customize.sh \
   README.md \
   LICENSE \
+  blocklist \
+  blocklist-der \
   -x '*.DS_Store' -x '*~' -x 'workspace/*' -x 'dist/*' -x '.git/*'
 
 echo "Built: $OUT"
