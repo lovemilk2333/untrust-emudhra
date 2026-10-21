@@ -28,6 +28,7 @@ zip -r9 "$OUT" \
   uninstall.sh \
   customize.sh \
   README.md \
+  LICENSE \
   -x '*.DS_Store' -x '*~' -x 'workspace/*' -x 'dist/*' -x '.git/*'
 
 echo "Built: $OUT"

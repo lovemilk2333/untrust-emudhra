@@ -65,4 +65,4 @@ Disable or remove the module in Magisk/KSU and reboot. Trust store returns to st
 
 ## License
 
-MIT
+[Unlicense](https://unlicense.org) (public domain) — see [LICENSE](LICENSE).
