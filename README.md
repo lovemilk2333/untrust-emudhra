@@ -2,6 +2,10 @@
 
 Magisk / KernelSU / APatch module that **blocks** the CAs from the [October 2026 eMudhra intermediate CA compromise](https://emudhra.we-have-a-problem.com/).
 
+
+> [!WARNING]
+> Some browsers manage their own CA certificates instead of using the system's certificate store. If these browsers are not kept up to date, they may become insecure.
+
 ## Why v1.1 “blocked nothing”
 
 Android does **not** treat files in `cacerts-removed` as a general SPKI blocklist.
